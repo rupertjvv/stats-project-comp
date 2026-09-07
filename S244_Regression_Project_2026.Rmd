@@ -1,0 +1,235 @@
+---
+title: "STA 244 -- Vehicle Price Prediction: A Regression Model"
+subtitle: "AF Regression Project 2026"
+author: "Group [XX]"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    number_sections: true
+    fig_height: 2.6
+    fig_width: 6
+geometry: margin=2cm
+fontsize: 10pt
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "95%")
+suppressPackageStartupMessages({
+  library(dplyr); library(ggplot2); library(ggpubr); library(scales)
+  library(car); library(nortest); library(leaps)
+})
+theme_set(theme_bw(base_size = 8))
+rmse <- function(y, yhat) sqrt(mean((y - yhat)^2))   # prediction accuracy metric
+```
+
+# Introduction and data preparation
+
+An online marketplace wants a tool that recommends an asking `price` (in ZAR) from a
+vehicle's characteristics. We build an interpretable, predictive multiple linear
+regression model on `r nrow(read.csv("Assignment Information and Data sets-20260907/project_traindata.txt"))`
+advertised vehicles and evaluate it out-of-sample with the **root mean square error (RMSE)**,
+the metric used in the competition.
+
+```{r load}
+train_raw <- read.csv("Assignment Information and Data sets-20260907/project_traindata.txt",
+                      stringsAsFactors = TRUE)
+# listing_id is an identifier (not a characteristic); model_year is a perfect linear
+# duplicate of vehicle_age (model_year + vehicle_age = 2026), so we keep vehicle_age only.
+dat <- train_raw %>% select(-listing_id, -model_year)
+```
+
+The data contain no missing values. `price` is strongly right-skewed (mean
+R`r format(round(mean(dat$price)), big.mark=",")` > median
+R`r format(round(median(dat$price)), big.mark=",")`) and is bounded below by zero, so a
+**log transformation of the response** is a natural candidate: it should symmetrise the
+distribution, stabilise the variance, linearise the (curved) relationships with age and
+mileage, and guarantee positive fitted prices.
+
+```{r eda-response, echo=FALSE, fig.height=2.2, fig.cap="Left: price is right-skewed. Right: log(price) is approximately symmetric and its relationship with vehicle age is close to linear."}
+p1 <- ggplot(dat, aes(price)) + geom_histogram(bins = 40, fill = "steelblue") +
+  scale_x_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  labs(x = "price (R)", y = "count", title = "Advertised price")
+p2 <- ggplot(dat, aes(vehicle_age, log(price))) +
+  geom_point(alpha = 0.15, size = 0.5) + geom_smooth(se = FALSE, linewidth = 0.6) +
+  labs(x = "vehicle age (years)", y = "log(price)", title = "log(price) vs age")
+ggarrange(p1, p2, ncol = 2)
+```
+
+```{r eda-cats, echo=FALSE, fig.height=2.3, fig.cap="log(price) differs markedly across vehicle segments and worsens with poorer service history and reported accidents, confirming these are informative predictors."}
+b1 <- ggplot(dat, aes(reorder(segment, log(price), median), log(price))) +
+  geom_boxplot(fill = "grey85", outlier.size = 0.4) + coord_flip() +
+  labs(x = NULL, y = "log(price)", title = "By segment")
+b2 <- ggplot(dat, aes(service_history, log(price))) +
+  geom_boxplot(fill = "grey85", outlier.size = 0.4) +
+  labs(x = NULL, y = NULL, title = "By service history")
+b3 <- ggplot(dat, aes(accident_history, log(price))) +
+  geom_boxplot(fill = "grey85", outlier.size = 0.4) +
+  labs(x = NULL, y = NULL, title = "By accident")
+ggarrange(b1, b2, b3, ncol = 3, widths = c(1.3, 1, 0.8))
+```
+
+# Training and validation sets
+
+To guard against over-fitting we randomly partition the data into an **80% training** set
+(used to estimate every candidate model) and a **20% validation** set (used only to compare
+out-of-sample prediction accuracy). An 80/20 split is standard practice: it retains enough
+data for stable estimation of the many factor levels while leaving a validation sample large
+enough for a reliable RMSE. A fixed seed makes the split reproducible.
+
+```{r split}
+set.seed(244)
+idx   <- sample(seq_len(nrow(dat)), size = floor(0.80 * nrow(dat)))
+train <- dat[idx, ]      # n = 1695
+valid <- dat[-idx, ]     # n = 424
+c(train = nrow(train), validation = nrow(valid), predictors = ncol(dat) - 1)
+```
+
+# Model building
+
+**Strategy.** We work on the log scale, start from the additive model with all candidate
+predictors, use significance testing and stepwise selection to remove uninformative
+variables (reducing data-collection cost), then add the non-linear and interaction terms
+suggested by the exploratory analysis. Each candidate is judged by validation RMSE on the
+original rand scale (back-transformed), supported by adjusted $R^2$.
+
+**Variable screening.** In the full additive log-model, `drop1` $F$-tests show every
+predictor is highly significant *except* `colour` and `warranty_months`
+($p \approx 0.51, 0.55$). Backward/stepwise selection by AIC agrees. We therefore drop both:
+the marketplace can stop collecting exterior colour and warranty length without harming
+predictive accuracy, saving data-collection and storage cost.
+
+```{r screen, results="hide"}
+full_log <- lm(log(price) ~ ., data = train)
+drop1(full_log, test = "F")                 # colour & warranty_months: not significant
+step_aic <- step(full_log, direction = "both", trace = 0)   # confirms same reduced set
+train <- train %>% select(-colour, -warranty_months)
+valid <- valid %>% select(-colour, -warranty_months)
+```
+
+**Non-linearity and interactions.** The EDA curves for age and mileage bend slightly, so we
+allow second-order (quadratic) terms for both. The brief notes that a predictor's effect may
+differ by segment; depreciation with age is indeed steeper for luxury vehicles than bakkies,
+so we add a `segment` $\times$ age interaction. We compare four nested candidates:
+
+```{r candidates}
+f0 <- log(price) ~ .                                                        # reduced additive
+f1 <- log(price) ~ . - vehicle_age + poly(vehicle_age, 2)                   # + age^2
+f2 <- log(price) ~ . - vehicle_age - mileage +
+        poly(vehicle_age, 2) + poly(mileage, 2)                             # + mileage^2
+f3 <- log(price) ~ . - vehicle_age - mileage +
+        poly(vehicle_age, 2) + poly(mileage, 2) + segment:poly(vehicle_age, 2)  # + segment x age
+mods <- list(Additive = f0, `+age^2` = f1, `+mileage^2` = f2, `+seg:age` = f3)
+res <- sapply(mods, function(f) {
+  m  <- lm(f, data = train)
+  s2 <- summary(m)$sigma^2                       # log-normal back-transform bias correction
+  c(adjR2   = summary(m)$adj.r.squared,
+    trRMSE  = rmse(train$price, exp(predict(m, train)) * exp(s2 / 2)),
+    valRMSE = rmse(valid$price, exp(predict(m, valid)) * exp(s2 / 2)))
+})
+tab <- t(res)
+data.frame(adjR2 = round(tab[, "adjR2"], 3),
+           trainRMSE = round(tab[, "trRMSE"]),
+           validRMSE = round(tab[, "valRMSE"]))
+```
+
+The `segment`$\times$age interaction gives the best validation RMSE, and its training and
+validation RMSE are close, indicating the model is **not over-fitting**. This is our final
+model. Because predicting on the log scale and exponentiating estimates the *median* price,
+we apply the standard log-normal correction factor $\exp(\hat\sigma^2/2)$ so that fitted
+values target the *mean* rand price, which lowers RMSE.
+
+```{r final-fit}
+final <- lm(f3, data = train)
+sigma2 <- summary(final)$sigma^2
+```
+
+# Model diagnostics and validation of assumptions
+
+```{r diag, echo=FALSE, fig.height=2.4, fig.cap="Residuals vs fitted show constant spread around zero with no systematic pattern (linearity + homoscedasticity); the normal Q-Q plot is close to the reference line apart from mild heavy tails."}
+fit_df <- data.frame(fitted = fitted(final), resid = rstandard(final))
+d1 <- ggplot(fit_df, aes(fitted, resid)) + geom_point(alpha = 0.15, size = 0.5) +
+  geom_hline(yintercept = 0, colour = "red") + geom_smooth(se = FALSE, linewidth = 0.5) +
+  labs(x = "fitted log(price)", y = "std. residual", title = "Residuals vs fitted")
+d2 <- ggplot(fit_df, aes(sample = resid)) + stat_qq(alpha = 0.2, size = 0.5) + stat_qq_line(colour = "red") +
+  labs(x = "theoretical", y = "sample", title = "Normal Q-Q")
+ggarrange(d1, d2, ncol = 2)
+```
+
+The **linearity** and **constant-variance** assumptions are satisfied: residuals scatter
+randomly around zero with roughly constant spread. The Q-Q plot supports approximate
+**normality** with slightly heavy tails. With `r nrow(train)` observations the estimators and
+$t$/$F$ inference are robust to this mild departure (CLT). **Multicollinearity** is not a
+concern: generalised VIFs on the additive model are all low (below).
+
+```{r vif}
+round(sort(vif(lm(log(price) ~ ., data = train))[, 3]^2), 2)  # (GVIF^(1/2df))^2 per predictor
+```
+
+```{r influence, echo=FALSE, fig.height=1.9, fig.cap="Cook's distance: a few advertisements are mildly influential but none exceeds the 4/n rule-of-thumb by a large margin, so no observations are removed."}
+infl <- data.frame(obs = seq_len(nrow(train)), cook = cooks.distance(final))
+ggplot(infl, aes(obs, cook)) + geom_segment(aes(xend = obs, yend = 0), linewidth = 0.2) +
+  geom_hline(yintercept = 4 / nrow(train), colour = "red", linetype = 2) +
+  labs(x = "observation", y = "Cook's distance", title = NULL)
+```
+
+We inspected the highest-leverage points (very low-mileage or very high-priced luxury
+listings). They are plausible genuine adverts, not data errors, so — following the brief —
+**no observations are removed**.
+
+# Interpretation and business use
+
+Coefficients are read on the log scale, so $100(e^{\beta}-1)\%$ is the percentage change in
+price for a one-unit increase in a predictor, holding others fixed.
+
+```{r interp, echo=FALSE}
+co <- summary(final)$coefficients
+show <- c("transmissionManual","fuel_typePetrol","engine_size",
+          "service_historyNone","service_historyPartial","accident_historyYes",
+          "previous_owners","seller_typePrivate")
+pct <- function(b) sprintf("%+.1f%%", 100 * (exp(b) - 1))
+tab <- data.frame(term = show,
+                  `pct change in price` = sapply(show, function(t) pct(co[t, 1])),
+                  check.names = FALSE)
+knitr::kable(tab, row.names = FALSE)
+```
+
+Key drivers: **age and mileage** dominate — price falls steeply as a car gets older and is
+driven more (the quadratic terms capture depreciation flattening out for older vehicles).
+A **reported accident** and **no service history** each cut price substantially, while a
+**larger engine**, **automatic transmission** and **dealership** sales command a premium.
+Segment strongly shifts the price level, and the `segment`$\times$age interaction shows
+luxury vehicles depreciate fastest.
+
+**How the business uses this.** For a new advert the tool returns a recommended price
+$\hat{\text{price}} = \exp(\hat{\eta})\,\exp(\hat\sigma^2/2)$. Adverts whose asking price sits
+far above (below) this prediction can be flagged to buyers as relatively expensive (a
+bargain). The screening step also tells the marketplace it can safely stop collecting
+`colour` and `warranty_months`.
+
+# Final model and competition predictions
+
+We refit the chosen specification on the **full training data** (train + validation) to use
+all information for the final predictions, then predict the test set and write the
+competition file.
+
+```{r predict}
+final_full <- lm(f3, data = dat %>% select(-colour, -warranty_months))
+s2_full    <- summary(final_full)$sigma^2
+
+test <- read.csv("Assignment Information and Data sets-20260907/project_testdata.txt",
+                 stringsAsFactors = TRUE)
+pred_price <- exp(predict(final_full, test)) * exp(s2_full / 2)
+
+submission <- data.frame(listing_id = test$listing_id, price = round(pred_price))
+write.csv(submission, "competition_predictions.csv", row.names = FALSE)
+head(submission, 3)
+```
+
+The validated out-of-sample RMSE of approximately
+R`r format(round(res["valRMSE","+seg:age"]), big.mark=",")` (against a median price of
+R`r format(round(median(dat$price)), big.mark=",")`) indicates the model predicts advertised
+prices well while remaining interpretable and parsimonious.

@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# R / knitr artefacts
+*_files/
+*_cache/
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# LaTeX intermediates
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
