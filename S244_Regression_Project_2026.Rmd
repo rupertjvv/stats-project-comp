@@ -46,8 +46,8 @@ cars <- cars %>% select(-listing_id, -model_year)
 There are `r nrow(cars)` cars and no missing values. A quick look at the response shows the
 usual price pattern: most cars are cheap-to-mid range with a long tail of expensive ones, so
 `price` is heavily right-skewed. Its relationships with the two obvious numeric drivers,
-age and mileage, are also curved rather than straight — a fresh car loses value quickly and
-then depreciation slows down.
+age and mileage, are also curved rather than straight. A fresh car loses value quickly and
+then the depreciation slows down.
 
 ```{r eda1, echo=FALSE, fig.height=2.1, fig.cap="Price is right-skewed with a long luxury tail, and both age and mileage bend the price down at a decreasing rate."}
 g1 <- ggplot(cars, aes(price)) + geom_histogram(bins = 40, fill = "steelblue") +
@@ -68,7 +68,8 @@ ggarrange(g1, g2, g3, ncol = 3)
 Among the categorical variables, `segment` and `service_history` stand out as clearly
 price-related, and a reported accident visibly lowers the typical price. `make`, `fuel_type`,
 `transmission` and `seller_type` show smaller but real differences, while `colour` and
-`province` look almost flat against price — something I return to when selecting variables.
+`province` look almost flat against price, which is something I come back to when selecting
+variables.
 
 ```{r eda2, echo=FALSE, fig.height=2.2, fig.cap="Price varies strongly by segment and service history and drops when an accident is reported; colour shows little relationship."}
 c1 <- ggplot(cars, aes(reorder(segment, price, median), price)) +
@@ -87,10 +88,10 @@ ggarrange(c1, c2, c3, ncol = 3, widths = c(1.2, 1, 1.3))
 # Training and validation split
 
 To get an honest read on prediction accuracy I set aside part of the data before doing any
-modelling. I use an 80/20 split — 80% to estimate models and 20% held back purely to compare
-them — which keeps enough data to estimate the many factor levels reliably while leaving a
-validation set large enough to give a stable RMSE. I fix the seed so the split (and every
-result that follows) is reproducible.
+modelling. I use an 80/20 split, with 80% to estimate models and 20% held back purely to
+compare them. That keeps enough data to estimate the many factor levels reliably while still
+leaving a validation set large enough to give a stable RMSE. I fix the seed so the split (and
+every result that follows) is reproducible.
 
 ```{r split}
 set.seed(244)
@@ -106,8 +107,8 @@ c(train = nrow(train), validation = nrow(valid))
 modelling `log(price)` rather than `price`. To check this properly rather than by eye, I run
 a Box-Cox analysis on the full model. The estimated power is $\hat\lambda \approx 0.06$ with a
 confidence interval covering 0, so the log ($\lambda = 0$) is the transformation the data
-support. It also has three practical pay-offs: it straightens out the age and mileage curves,
-makes the error spread roughly constant, and guarantees the model never predicts a negative
+support. It helps in a few practical ways too: it straightens out the age and mileage curves,
+makes the error spread roughly constant, and stops the model from ever predicting a negative
 price.
 
 ```{r boxcox, results="hide", fig.show="hide"}
@@ -134,9 +135,9 @@ I did consider collapsing rare categories into an "Other" group, but every level
 only throw away information.
 
 **Adding shape and interactions.** From the exploration I let age and mileage enter as
-quadratics to capture the flattening depreciation, and — since the brief hints that a
-predictor's effect can differ by segment — I allow the age effect to vary by segment (luxury
-cars lose value faster than bakkies). I compare each addition on the validation set, using the
+quadratics to capture the flattening depreciation. Since the brief hints that a predictor's
+effect can differ by segment, I also allow the age effect to vary by segment (luxury cars lose
+value faster than bakkies). I compare each addition on the validation set, using the
 log-normal correction $\exp(\hat\sigma^2/2)$ when back-transforming so the predictions target
 the mean rand price rather than the median.
 
@@ -222,16 +223,16 @@ knitr::kable(data.frame(Factor = labs,
 ```
 
 Age and mileage dominate the price (their quadratic terms trace the steep-then-flattening
-depreciation curve), and `segment` shifts the whole price level — a hatchback sells for around
-44% less than a comparable bakkie, while luxury cars sit highest. On top of that, condition
-and history matter: a car with no service record loses about 16% and a reported accident about
+depreciation curve), and `segment` shifts the whole price level: a hatchback sells for around
+44% less than a comparable bakkie, while luxury cars sit highest. Condition and history matter
+on top of that. A car with no service record loses about 16% and a reported accident about
 11%, so honest, well-serviced cars command a clear premium. Bigger engines and dealership sales
 lift the price, and each extra previous owner shaves a little off.
 
-For the marketplace this gives a ready-made pricing tool: for a new advert it returns a
+For the marketplace this gives a practical pricing tool: for a new advert it returns a
 recommended price $\hat{\text{price}} = \exp(\hat\eta)\,\exp(\hat\sigma^2/2)$, and any advert
 sitting far above or below that number can be flagged to buyers as expensive or a bargain. The
-model also tells the business which fields are worth collecting — age, mileage, segment, make,
+model also tells the business which fields are worth collecting. Age, mileage, segment, make,
 service and accident history carry almost all the signal, while colour and warranty length can
 be dropped to save data-collection cost. Its main weakness is the luxury tail: those cars carry
 the largest rand errors simply because small percentage misses translate into large amounts, so
@@ -255,5 +256,5 @@ write.csv(data.frame(listing_id = test$listing_id, price = round(pred)),
 
 On the held-out validation set this model predicts price to within an RMSE of about
 R`r format(round(compare["validRMSE", "+ segment:age"]), big.mark=",")`, against a typical
-price near R`r format(round(median(cars$price)), big.mark=",")` — accurate enough to be useful
-while staying simple enough to explain to a seller.
+price near R`r format(round(median(cars$price)), big.mark=",")`. That is accurate enough to be
+useful while staying simple enough to explain to a seller.
