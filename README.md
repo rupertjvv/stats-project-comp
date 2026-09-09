@@ -3,6 +3,10 @@
 Multiple linear regression model that predicts second-hand vehicle **price** (ZAR)
 from a vehicle's characteristics, for an online marketplace's automated pricing tool.
 
+**[View the report (PDF)](https://github.com/rupertjvv/stats-project-comp/blob/main/S244_Regression_Project_2026.pdf)** —
+if the inline preview doesn't load, use the
+[raw download](https://raw.githubusercontent.com/rupertjvv/stats-project-comp/main/S244_Regression_Project_2026.pdf).
+
 ## Contents
 
 | File | Description |
